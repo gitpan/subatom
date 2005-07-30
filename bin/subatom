@@ -1,0 +1,219 @@
+#!/usr/bin/perl -wT
+#
+# Produce an atom feed of subversion commits.
+#
+# @(#) $Id: subatom 721 2005-07-30 22:08:37Z dom $
+#
+
+use strict;
+use warnings;
+
+use File::Basename qw( basename dirname );
+use File::Spec;
+use Getopt::Std qw( getopts );
+use XML::Atom::Content;
+use XML::Atom::Entry;
+use XML::Atom::Feed;
+use XML::Atom::Person;
+use XML::Atom::Util qw( encode_xml );
+
+our $VERSION = '0.01';
+my $me = basename $0;
+
+sub usage;
+
+# Ensure we know what we're doing for tainting.
+local $ENV{PATH} = join ':', qw( /bin /usr/bin /usr/local/bin );
+
+my %opt = ( 'm' => 30 );
+getopts( "m:", \%opt ) or usage;
+
+my $repos = shift
+  or usage;
+# untaint.
+$repos =~ m/^((?:https?|file|svn|svn\+ssh):\/\/[-\/\w.\@]+)/;
+my $repos_url = $1;
+usage unless $repos_url;
+$repos_url =~ s!/$!!;           # Remove trailing slash.
+
+# Filter out crap (for tainting).
+my @path = grep { $_ } map { m!^(/[-/\w.\@]+)$!; $1 } @ARGV;
+@path = qw( / ) unless @path;
+
+my @items = fetch_log_items( $repos_url, @path );
+
+my $feed = make_feed_from_items( @items );
+print $feed->as_xml;
+exit 0;
+
+sub usage {
+    die "usage: $me [-m max] repos_url [path ...]\n";
+}
+
+sub fetch_log_items {
+    my ( $repos_url, @path ) = @_;
+
+    # See perlipc(3) for details about all this.
+    my $pid = open my $fh, '-|';
+    if ( $pid ) {
+        # Parent.
+        my @items = process_log_lines( $fh );
+        close $fh;
+        return @items;
+    } else {
+        # Child.  Ensure that errors get thrown away, since svn log
+        # will probably die with a "broken pipe" error.  That's
+        # because we close it as soon as we've read enough.
+        open STDERR, File::Spec->devnull;
+        exec 'svn', 'log', '-v', $repos_url, @path
+            or die "$me: exec(svn log): $!\n";
+        # NOTREACHED
+    }
+}
+
+sub process_log_lines {
+    my ( $fh ) = @_;
+    my ( @items, $current_item, $in_paths );
+    while ( <$fh> ) {
+        1 while chomp;
+        if ( m/^-+$/ ) {
+            push @items, $current_item if $current_item;
+            last if @items >= $opt{ m };
+            $current_item = {};
+        } elsif ( m/^r\d+ / ) {
+            my ( $ver, $user, $date, $lines ) = split / \| /;
+            $ver   =~ s/^r//;
+            $date  =~ s/ \(.*\)//;
+            $lines =~ s/ .*//;
+            $current_item->{ revision } = $ver;
+            $current_item->{ date }     = $date;
+            $current_item->{ user }     = $user;
+            $current_item->{ lines }    = $lines;
+        } elsif ( m/^Changed paths:/ ) {
+            $in_paths = 1;
+        } elsif ( m/^$/ ) {
+            $in_paths = 0;
+        } elsif ( $in_paths ) {
+            push @{ $current_item->{ affected } }, $_;
+        } else {
+            push @{ $current_item->{ msg } }, $_;
+        }
+    }
+    return @items;
+}
+
+sub item_to_entry {
+    my ( $item ) = @_;
+    my $msg = encode_xml join "\n", @{ $item->{ msg } };
+    $msg = "<p>$msg</p>\n";
+    $msg .= "<p>Affected files:</p>\n";
+    $msg .= "<ul>\n";
+    $msg .= "<li>$_</li>\n" foreach @{ $item->{ affected } };
+    $msg .= "</ul>\n";
+
+    my $entry = XML::Atom::Entry->new;
+    $entry->title( item_title( $item ) );
+    $entry->content( $msg );
+
+    my $author = XML::Atom::Person->new;
+    $author->name( $item->{ user } );
+    $entry->author( $author );
+
+    # XXX What to link to?
+
+    # XXX Date?
+
+    return $entry;
+}
+
+sub item_title {
+    my ( $item ) = @_;
+    my @files =
+        sort { length( $a ) <=> length( $b ) }
+        map  { ( split ' ' )[1] } @{ $item->{ affected } };
+    my $d = dirname( $files[0] );
+    return "r$item->{revision} - $d";
+}
+
+sub make_feed_from_items {
+    my ( @items ) = @_;
+    my $feed = XML::Atom::Feed->new;
+    $feed->title( "Recent commits to $repos_url" );
+    $feed->add_entry( item_to_entry( $_ ) ) foreach @items;
+    return $feed;
+}
+
+__END__
+
+=pod
+
+=head1 NAME
+
+subatom - produce an atom feed from subversion commits
+
+=head1 SYNOPSIS
+
+  subatom [-m max] REPOSITORY_URL [path ...]
+
+=head1 DESCRIPTION
+
+B<subatom> is a small script to produce an Atom feed from subversion
+commits.  You can use this with a feed reader to see new commits to
+your repository.
+
+The first argument is the URL for your subversion repository.  The
+remaining arguments are paths within the repository for which you
+would like commit messages.  If you don't specify any, it will default
+to the entire repository.
+
+The I<-m> flag states how many entries you would like in the feed.
+The default is 30.
+
+=head1 SEE ALSO
+
+L<XML::Atom>
+
+L<http://subversion.tigris.org/>
+
+=head1 AUTHOR
+
+Dominic Mitchell E<lt>cpan (at) happygiraffe.netE<gt>
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2004 by Dominic Mitchell. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+=over 4
+
+=item 1.
+
+Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+=item 2.
+
+Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+=back
+
+THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+=cut
+
+# vim: set ai et sw=4 :
