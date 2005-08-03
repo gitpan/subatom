@@ -1,5 +1,10 @@
 Revision history for Perl extension subatom.
 
+0.03  Wed Aug  3 09:20:09 BST 2005
+	- Ensure times are correct in resulting feed (always UTC).
+	- Add a -o flag to write to a file but only if needed (makes
+	  If-Modified-Since work).
+
 0.02  Mon Aug  1 13:43:44 BST 2005
 	- Added more Atom bits to the resulting feed:
 	  * feed/entry/content/@type
@@ -13,4 +18,4 @@ Revision history for Perl extension subatom.
 0.01  Sat Jul 30 20:58:29 2005
 	- original version
 
-# @(#) $Id: Changes 737 2005-08-01 12:45:43Z dom $
+# @(#) $Id: Changes 750 2005-08-03 08:22:31Z dom $
