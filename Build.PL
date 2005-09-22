@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# @(#) $Id: Build.PL 715 2005-07-30 21:29:23Z dom $
+# @(#) $Id: Build.PL 894 2005-09-22 12:13:04Z dom $
 
 use strict;
 use Module::Build;
@@ -11,4 +11,5 @@ Module::Build->new(
     create_makefile_pl => 'passthrough',
     script_files       => ['bin/subatom'],
     requires           => { 'XML::Atom' => 0 },
+    add_to_cleanup     => ['subatom-*'],
 )->create_build_script;
