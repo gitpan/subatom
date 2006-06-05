@@ -1,5 +1,8 @@
 Revision history for Perl extension subatom.
 
+0.07  Mon Jun  5 23:02:13 BST 2006
+    - Switch to XML::Atom::SimpleFeed instead of XML::Atom.  It's much simpler.
+
 0.06  Mon Dec  5 14:33:31 GMT 2005
 	- Avoid an undefined value warning.
 
@@ -27,4 +30,4 @@ Revision history for Perl extension subatom.
 0.01  Sat Jul 30 20:58:29 2005
 	- original version
 
-# @(#) $Id: Changes 892 2005-09-22 12:05:34Z dom $
+# @(#) $Id: Changes 1173 2006-06-05 22:02:56Z dom $
