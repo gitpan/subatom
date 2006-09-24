@@ -2,7 +2,7 @@
 #
 # Produce an atom feed of subversion commits.
 #
-# @(#) $Id: subatom 1177 2006-06-05 22:17:55Z dom $
+# @(#) $Id: subatom 1248 2006-09-24 21:24:20Z dom $
 #
 
 use strict;
@@ -13,7 +13,7 @@ use File::Spec;
 use Getopt::Std qw( getopts );
 use XML::Atom::SimpleFeed;
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 my $me = basename $0;
 
 sub usage;
@@ -21,48 +21,56 @@ sub usage;
 # Ensure we know what we're doing for tainting.
 local $ENV{ PATH } = join ':', qw( /bin /usr/bin /usr/local/bin );
 
-my %opt = ( 'm' => 30 );
-getopts( "m:o:v:", \%opt ) or usage;
+my %opt;
+getopts( "c:m:o:v:s:", \%opt ) or usage;
+if ( $opt{ c } ) {
+    run_one_config( $_ ) foreach read_config( $opt{ c } );
+    exit 0;
+}
 
+my $config = {
+    max_entries => $opt{ m },
+    output_file => $opt{ o },
+    viewcvs_url => $opt{ v },
+    self_url    => $opt{ s },
+};
 my $repos = shift
   or usage;
 
-# untaint.
-$repos =~ m/^((?:https?|file|svn|svn\+ssh):\/\/[-\/\w.\@]+)/;
-my $repos_url = $1;
-usage unless $repos_url;
-$repos_url =~ s!/$!!;    # Remove trailing slash.
+$config->{ repos_url } = untaint_repos_url( $repos );
+$config->{ path }      = [ map { untaint_path( $_ ) } @ARGV ];
 
-# Filter out crap (for tainting).
-my @path = grep { $_ } map { m!^(/[-/\w.\@]+)$!; $1 } @ARGV;
-@path = qw( / ) unless @path;
+apply_defaults( $config );
+run_one_config( $config );
 
-my @items = fetch_log_items( $repos_url, @path );
-
-my $feed = make_feed_from_items( \@items, \@path );
-my $xml = $feed->as_string;
-if ( $opt{ o } ) {
-    my ( $file ) = $opt{ o } =~ m/^([-\w\/.]+)/;    # untaint.
-    write_feed_to_file( $xml => $file );
-}
-else {
-    print $xml;
-}
 exit 0;
 
 sub usage {
-    die "usage: $me [-m max] [-o output] [-v viewcvs] repos_url [path ...]\n";
+    die <<USAGE;
+usage: $me [-m max] [-o output] [-v viewcvs] [-s linktoself] repos_url [path ...]
+       $me -c config_file
+USAGE
+}
+
+sub run_one_config {
+    my ( $config ) = @_;
+
+    my @items = fetch_log_items( $config );
+    my $feed  = make_feed_from_items( $config, \@items );
+    my $xml   = $feed->as_string;
+    write_feed_to_file( $xml => $config->{ output_file } );
+    return;
 }
 
 sub fetch_log_items {
-    my ( $repos_url, @path ) = @_;
+    my ( $config ) = @_;
 
     # See perlipc(3) for details about all this.
     my $pid = open my $fh, '-|';
     if ( $pid ) {
 
         # Parent.
-        my @items = process_log_lines( $fh );
+        my @items = process_log_lines( $config, $fh );
         close $fh;
         return @items;
     }
@@ -76,7 +84,7 @@ sub fetch_log_items {
         # Ensure that we get subversion to generate times with no
         # timezone.  This means that they match the Atom expectation.
         local $ENV{ TZ } = 'UTC';
-        exec 'svn', 'log', '-v', $repos_url, @path
+        exec 'svn', 'log', '-v', $config->{ repos_url }, @{ $config->{ path } }
           or die "$me: exec(svn log): $!\n";
 
         # NOTREACHED
@@ -84,13 +92,13 @@ sub fetch_log_items {
 }
 
 sub process_log_lines {
-    my ( $fh ) = @_;
+    my ( $config, $fh ) = @_;
     my ( @items, $current_item, $in_paths );
     while ( <$fh> ) {
         1 while chomp;
         if ( m/^-+$/ ) {
             push @items, $current_item if $current_item;
-            last if @items >= $opt{ m };
+            last if @items >= $config->{ max_entries };
             $current_item = {};
         }
         elsif ( m/^r\d+ / ) {
@@ -120,21 +128,20 @@ sub process_log_lines {
 }
 
 sub item_link {
-    my ( $item ) = @_;
+    my ( $config, $item ) = @_;
 
-    if ( $opt{ v } ) {
-        return $opt{ v } . $item->{ revision };
+    if ( $config->{ viewcvs_url } ) {
+        return $config->{ viewcvs_url } . $item->{ revision };
     }
     else {
-
         # Just link to the first changed file.
-        my $path = ( split ' ', $item->{ affected }[0], 2 )[1];
-        return $repos_url . $path;
+        my $path = ( split ' ', $item->{ affected }[0] )[1];
+        return $config->{ repos_url } . $path;
     }
 }
 
 sub item_to_entry {
-    my ( $feed, $item ) = @_;
+    my ( $config, $feed, $item ) = @_;
 
     # Use the internal writer to do this.  Slightly sneaky.
     my $cdata   = \&XML::Atom::SimpleFeed::_cdata;
@@ -147,13 +154,13 @@ sub item_to_entry {
     $msg .= "</ul>\n";
 
     $feed->add_entry(
-        id      => $repos_url . '#r' . $item->{ revision },
+        id      => $config->{ repos_url } . '#r' . $item->{ revision },
         title   => item_title( $item ),
         updated => svn_date_to_atom_date( $item->{ date } ),
         content => $msg,
         summary => $summary,
         author  => $item->{ user },
-        link    => item_link( $item ),
+        link    => item_link( $config, $item ),
     );
 
     return;
@@ -181,19 +188,22 @@ sub item_title {
 }
 
 sub make_feed_from_items {
-    my ( $items, $requested ) = @_;
+    my ( $config, $items ) = @_;
 
-    my $title = "Recent commits to $repos_url";
-    $title .= " for @{$requested}"
-      unless @{ $requested } == 1 && $requested->[0] eq '/';
+    my $title = "Recent commits to $config->{repos_url}";
+    $title .= " for @{$config->{path}}"
+      unless @{ $config->{ path } } == 1 && $config->{ path }[0] eq '/';
 
-    my $feed = XML::Atom::SimpleFeed->new(
-        id      => $repos_url,
+    my %feed_params = (
+        id      => $config->{ repos_url },
         title   => $title,
         updated => svn_date_to_atom_date( $items->[0]{ date } ),
     );
+    $feed_params{ link } = { rel => 'self', href => $config->{ self_url } }
+      if $config->{ self_url };
+    my $feed = XML::Atom::SimpleFeed->new( %feed_params );
 
-    item_to_entry( $feed, $_ ) foreach @{ $items };
+    item_to_entry( $config, $feed, $_ ) foreach @{ $items };
     return $feed;
 }
 
@@ -216,6 +226,91 @@ sub write_feed_to_file {
     close $fh;
 }
 
+sub valid_command {
+    my ( $cmd ) = @_;
+    # A command exists if it has an untaint routine.
+    no strict 'refs';
+    return defined *{ "untaint_$cmd" }{ CODE };
+}
+
+sub untaint_max_entries { m/^(\d+)$/;         $1 }
+sub untaint_output_file { m/^([-\w\/.]+)/;    $1 }
+sub untaint_path        { m!^(/[-/\w.\@]+)$!; $1 }
+
+sub untaint_repos_url {
+    m/^((?:https?|file|svn|svn\+ssh):\/\/[-\/\w.\@~]+)/;
+    my $url = $1;
+    $url =~ s/\/+$//;    # Remove trailing slash.
+    return $url;
+}
+sub untaint_self_url    { m/^((?:https?|file):\/\/[-\/\w.\@~?&=]+)/; $1 }
+sub untaint_viewcvs_url { m/^((?:https?|file):\/\/[-\/\w.\@~?&=]+)/; $1 }
+
+sub untaint {
+    my ( $cmd, $arg ) = @_;
+
+    local $_ = $arg;
+    $cmd =~ m/^(\w+)$/;    # untaint cmd...
+    return eval "untaint_$1()";
+}
+
+sub apply_defaults {
+    my ( $config ) = @_;
+    $config->{ max_entries } ||= 30;
+    $config->{ path }        ||= ['/'];
+    $config->{ path } = ['/'] if @{ $config->{ path } } == 0;
+    return;
+}
+
+sub is_good_config {
+    my ( $config ) = @_;
+    return $config->{ repos_url } && $config->{ output_file };
+}
+
+sub read_config {
+    my ( $file ) = @_;
+    my @todo;
+    my $current = {};
+    my $next_stanza = sub {
+        apply_defaults( $current );
+        if ( is_good_config( $current ) ) {
+            push @todo, $current;
+        }
+        else {
+            warn "$me: $file: ignoring incomplete stanza before line $.\n";
+        }
+        $current = {};
+    };
+    open my $fh, '<', $file or die "open($file): $!\n";
+    while ( <$fh> ) {
+        1 while chomp;
+
+        # When you see a blank line, it introduces a new config stanza.
+        $next_stanza->() if /^$/ && %$current;
+        
+        # Strip comments.
+        s/#.*//;
+
+        my ( $cmd, $arg ) = split ' ', $_, 2;
+        next unless $cmd;
+        if ( !valid_command( $cmd ) ) {
+            warn "$me: $file: unknown command '$cmd' on line $.\n";
+            next;
+        }
+        my $untainted_arg = untaint( $cmd, $arg );
+        warn "$me: $file: using untainted value '$untainted_arg' on line $.\n"
+          if $arg ne $untainted_arg;
+        if ( $cmd eq 'path' ) {
+            push @{ $current->{ path } }, $untainted_arg;
+        }
+        else {
+            $current->{ $cmd } = $untainted_arg;
+        }
+    }
+    $next_stanza->();
+    return @todo;
+}
+
 __END__
 
 =pod
@@ -227,6 +322,7 @@ subatom - produce an atom feed from subversion commits
 =head1 SYNOPSIS
 
   subatom [-m max] [-o output] [-v viewcvs] REPOSITORY_URL [path ...]
+  subatom -c config_file
 
 =head1 DESCRIPTION
 
@@ -263,11 +359,77 @@ probably give some odd looking errors.
 If you don't pass in a URL, a link will be automatically made to the
 first file that changed in this commit.
 
+If you pass an URL using the I<-s> flag, it will be used as the I<self>
+link for the feed.  Use this if you would like to avoid warnings from
+the feed validator.
+
+=head1 CONFIG FILE
+
+In order to avoid wrapper scripts calling subatom with lots of parameters,
+you can also specify a config file.  The format of the file consists of
+lines containing key-value pairs separated by whitespace.  A blank line
+introduces a new stanza.  You can generate multiple feeds by specifying
+several stanzas.
+
+The following keywords are recognized.
+
+=over 4
+
+=item I<max_entries>
+
+How many entries should be in the feed?  Defaults to 30.
+
+=item I<output_file>
+
+Where should the feed be written to?  Must be specified.
+
+=item I<repos_url>
+
+The path to the root of the repository.  Must be specified.
+
+B<NB>: I<subatom> likes to have the trailing slash removed, if you get any
+complaints, try taking it off.
+
+=item I<path>
+
+Specifies a directory in the repository to monitor commit messages for.
+Defaults to '/'.
+
+=item I<self_url>
+
+Specifies the URL of the feed that will be produced.  No default.
+
+=item I<viewcvs_url>
+
+Specifies an URL prefix which will have the revision number appended to
+produce the link for each commit.  For example, if you have a trac setup,
+use something like this:
+
+  viewcvs_url http://dev.rubyonrails.org/changeset/
+
+=back
+
+=head2 EXAMPLE
+
+    output_file /www/svn.atom
+    path        /trunk
+    repos_url   http://svn.collab.net/repos/svn
+    self_url    http://localhost/svn.atom
+    viewcvs_url http://svn.collab.net/viewvc/svn?view=rev&revision=
+
+    output_file /www/rails.atom
+    path        /trunk
+    repos_url   http://dev.rubyonrails.org/svn/rails
+    self_url    http://localhost/rails.atom
+    viewcvs_url http://dev.rubyonrails.org/changeset/
+
 =head1 SEE ALSO
 
 L<XML::Atom>
 
 L<http://subversion.tigris.org/>
+
+L<http://feedvalidator.org/>
 
 =head1 AUTHOR
 

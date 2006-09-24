@@ -1,6 +1,6 @@
 ---
 name: subatom
-version: 0.08
+version: 0.09
 author: []
 abstract: produce an atom feed from subversion commits
 license: bsd
@@ -8,7 +8,7 @@ resources:
   license: http://www.opensource.org/licenses/bsd-license.php
 requires:
   XML::Atom::SimpleFeed: 0.8
-generated_by: Module::Build version 0.2801
+generated_by: Module::Build version 0.2805
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.2.html
   version: 1.2
