@@ -1,6 +1,6 @@
 ---
 name: subatom
-version: 0.09
+version: 0.10
 author: []
 abstract: produce an atom feed from subversion commits
 license: bsd

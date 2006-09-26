@@ -2,18 +2,17 @@
 #
 # Produce an atom feed of subversion commits.
 #
-# @(#) $Id: subatom 1248 2006-09-24 21:24:20Z dom $
+# @(#) $Id: subatom 1256 2006-09-26 08:16:40Z dom $
 #
 
 use strict;
 use warnings;
 
 use File::Basename qw( basename dirname );
-use File::Spec;
 use Getopt::Std qw( getopts );
 use XML::Atom::SimpleFeed;
 
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 my $me = basename $0;
 
 sub usage;
@@ -28,17 +27,17 @@ if ( $opt{ c } ) {
     exit 0;
 }
 
-my $config = {
-    max_entries => $opt{ m },
-    output_file => $opt{ o },
-    viewcvs_url => $opt{ v },
-    self_url    => $opt{ s },
-};
+my $config = {};
+$config->{ max_entries } = untaint( max_entries => $opt{ m } ) if $opt{ m };
+$config->{ output_file } = untaint( output_file => $opt{ o } ) if $opt{ o };
+$config->{ viewcvs_url } = untaint( viewcvs_url => $opt{ v } ) if $opt{ v };
+$config->{ self_url }    = untaint( self_url    => $opt{ s } ) if $opt{ s };
+
 my $repos = shift
   or usage;
 
-$config->{ repos_url } = untaint_repos_url( $repos );
-$config->{ path }      = [ map { untaint_path( $_ ) } @ARGV ];
+$config->{ repos_url } = untaint( repos_url => $repos );
+$config->{ path }      = [ map { untaint( path => $_ ) } @ARGV ];
 
 apply_defaults( $config );
 run_one_config( $config );
@@ -58,7 +57,12 @@ sub run_one_config {
     my @items = fetch_log_items( $config );
     my $feed  = make_feed_from_items( $config, \@items );
     my $xml   = $feed->as_string;
-    write_feed_to_file( $xml => $config->{ output_file } );
+    if ( $config->{ output_file } ) {
+        write_feed_to_file( $xml => $config->{ output_file } );
+    }
+    else {
+        print $xml;
+    }
     return;
 }
 
@@ -68,24 +72,25 @@ sub fetch_log_items {
     # See perlipc(3) for details about all this.
     my $pid = open my $fh, '-|';
     if ( $pid ) {
-
-        # Parent.
+        binmode $fh, ':utf8';
         my @items = process_log_lines( $config, $fh );
         close $fh;
         return @items;
     }
     else {
-
-        # Child.  Ensure that errors get thrown away, since svn log
-        # will probably die with a "broken pipe" error.  That's
-        # because we close it as soon as we've read enough.
-        open STDERR, File::Spec->devnull;
-
         # Ensure that we get subversion to generate times with no
         # timezone.  This means that they match the Atom expectation.
         local $ENV{ TZ } = 'UTC';
-        exec 'svn', 'log', '-v', $config->{ repos_url }, @{ $config->{ path } }
-          or die "$me: exec(svn log): $!\n";
+
+        # Try to coerce subversion into spitting out UTF-8.
+        local $ENV{ LC_ALL } = 'en_US.UTF-8';
+
+        my @cmd = ( 'svn', 'log', '-v' );
+        push @cmd, '--limit', $config->{ max_entries }
+          if `svn log --help` =~ m/--limit/;
+        push @cmd, $config->{ repos_url }, @{ $config->{ path } };
+
+        exec @cmd or die "$me: exec(@cmd): $!\n";
 
         # NOTREACHED
     }
@@ -124,6 +129,8 @@ sub process_log_lines {
             push @{ $current_item->{ msg } }, $_;
         }
     }
+    # Use up remaining lines.  This lets us avoid a SIGPIPE warning from svn.
+    1 while <$fh>;
     return @items;
 }
 
